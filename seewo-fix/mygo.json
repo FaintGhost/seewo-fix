@@ -1,0 +1,9 @@
+{
+  "name": "希沃偏移修复",
+  "identifier": "dev.local.seewo-fix",
+  "version": "0.1.0",
+  "out": "build",
+  "fileAssociations": [
+    { "ext": ["pptx"], "name": "PPTX 课件", "role": "Editor" }
+  ]
+}

@@ -1,0 +1,37 @@
+# Local courseware and Office lock files
+*.pptx
+*.enbx
+~$*
+
+# Built applications, installers and command-line binaries
+*.app/
+*.dmg
+*.pkg
+*.exe
+**/build/
+**/bin/
+**/.mygo/
+mygo_windows_*.syso
+
+# Local verification evidence, backups and extracted client code
+/verification/
+
+# Local agent tooling and editor state
+**/.agents/
+**/.claude/
+.idea/
+.vscode/
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local configuration and credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Test output
+*.test
+*.out
+coverage.*
