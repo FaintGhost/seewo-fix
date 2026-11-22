@@ -1,7 +1,13 @@
 {
   "name": "希沃偏移修复",
   "identifier": "dev.local.seewo-fix",
-  "version": "0.1.0",
+  "slug": "seewo-fix",
+  "version": "0.1.4",
+  "updates": {
+    "github": "FaintGhost/seewo-fix",
+    "publicKey": "kxoX3De+A0sb3hDgiMnAyMw8wH0LvshRLCZ7Vx/j7sc=",
+    "deltas": 3
+  },
   "out": "build",
   "fileAssociations": [
     { "ext": ["pptx"], "name": "PPTX 课件", "role": "Editor" }

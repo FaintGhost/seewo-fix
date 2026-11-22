@@ -1,6 +1,8 @@
 package enbxgen
 
 import (
+	"cmp"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 
@@ -31,6 +33,7 @@ type para struct {
 	spcBef  float64 // px
 	spcAft  float64 // px
 	lines   []lineSpan
+	justify bool
 	bullet  bool
 	buChar  string
 	buFont  string
@@ -104,6 +107,10 @@ func (c *conv) runProps(rPr *etree.Element, base run) (run, string, string) {
 // readBody turns a p:txBody into paragraphs of 希沃 runs, line breaks
 // included, for a box whose text area is availPx wide.
 func (c *conv) readBody(tb *etree.Element, availEMU int64, fontColor string) body {
+	return c.readStyledBody(tb, availEMU, run{color: fontColor})
+}
+
+func (c *conv) readStyledBody(tb *etree.Element, availEMU int64, defaults run) body {
 	b := body{lIns: 91440, tIns: 45720, rIns: 91440, bIns: 45720, wrap: true, anchor: "t"}
 	if bp := tb.FindElement("./bodyPr"); bp != nil {
 		for k, p := range map[string]*int64{"lIns": &b.lIns, "tIns": &b.tIns, "rIns": &b.rIns, "bIns": &b.bIns} {
@@ -118,16 +125,9 @@ func (c *conv) readBody(tb *etree.Element, availEMU int64, fontColor string) bod
 		b.lIns, b.tIns, b.rIns, b.bIns = c.cellInsets[0], c.cellInsets[1], c.cellInsets[2], c.cellInsets[3]
 	}
 	avail := float64(availEMU - b.lIns - b.rIns)
-	base := run{sizePt: float64(c.d.defSz) / 100, color: "#FF000000"}
-	if col, ok := c.d.theme.color(etree.NewElement("x")); ok {
-		base.color = col
-	}
-	if tx1 := c.d.theme.colors[c.d.theme.clrMap["tx1"]]; tx1 != "" {
-		base.color = "#FF" + tx1
-	}
-	if fontColor != "" {
-		base.color = fontColor // the shape style's text colour (p:style/fontRef)
-	}
+	base := defaults
+	base.sizePt = float64(c.d.defSz) / 100
+	base.color = cmp.Or(base.color, "#FF"+cmp.Or(c.d.theme.colors[c.d.theme.clrMap["tx1"]], "000000"))
 	ps := tb.FindElements("./p")
 	for pi, p := range ps {
 		pr := para{align: "Left", lnPct: 1}
@@ -138,8 +138,8 @@ func (c *conv) readBody(tb *etree.Element, availEMU int64, fontColor string) bod
 				pr.align = "Center"
 			case "r":
 				pr.align = "Right"
-			case "just", "dist":
-				pr.align = "Left" // 希沃 has no justified text
+			case "just":
+				pr.justify = true
 			}
 			pr.marL = px(attrInt(ppr, "marL"))
 			pr.indent = px(attrInt(ppr, "indent"))
@@ -166,6 +166,17 @@ func (c *conv) readBody(tb *etree.Element, availEMU int64, fontColor string) bod
 				pr.warning = "自动编号"
 			}
 		}
+		level := int64(0)
+		if ppr != nil {
+			level = attrInt(ppr, "lvl")
+		}
+		paragraphDefault, latinDefault, eaDefault := c.runProps(tb.FindElement("./lstStyle/lvl"+strconv.FormatInt(level+1, 10)+"pPr/defRPr"), base)
+		if ppr != nil {
+			var latin, ea string
+			paragraphDefault, latin, ea = c.runProps(ppr.SelectElement("defRPr"), paragraphDefault)
+			latinDefault = cmp.Or(latin, latinDefault)
+			eaDefault = cmp.Or(ea, eaDefault)
+		}
 		type item struct {
 			r         run
 			latin, ea string
@@ -175,25 +186,26 @@ func (c *conv) readBody(tb *etree.Element, availEMU int64, fontColor string) bod
 		for _, ch := range p.ChildElements() {
 			switch ch.Tag {
 			case "r", "fld":
-				r, latin, ea := c.runProps(ch.FindElement("./rPr"), base)
+				r, latin, ea := c.runProps(ch.FindElement("./rPr"), paragraphDefault)
 				t := ""
 				if te := ch.FindElement("./t"); te != nil {
 					t = te.Text()
 				}
 				items = append(items, item{r: r, latin: latin, ea: ea, text: t})
 			case "br":
-				r, latin, ea := c.runProps(ch.FindElement("./rPr"), base)
+				r, latin, ea := c.runProps(ch.FindElement("./rPr"), paragraphDefault)
 				items = append(items, item{r: r, latin: latin, ea: ea, text: "\v"})
 			}
 		}
-		end, el, ee := c.runProps(p.FindElement("./endParaRPr"), base)
+		end, el, ee := c.runProps(p.FindElement("./endParaRPr"), paragraphDefault)
+		el, ee = cmp.Or(el, latinDefault), cmp.Or(ee, eaDefault)
 		// split into 希沃 runs: one font each
 		for _, it := range items {
-			latin := it.latin
+			latin := cmp.Or(it.latin, latinDefault)
 			if latin == "" {
 				latin = c.d.theme.minor["latin"]
 			}
-			ea := it.ea
+			ea := cmp.Or(it.ea, eaDefault)
 			if ea == "" {
 				ea = c.d.theme.minor["ea"]
 			}

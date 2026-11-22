@@ -3,8 +3,10 @@ package enbxgen
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"path"
 	"strconv"
@@ -20,10 +22,14 @@ func px(emu int64) float64 { return float64(emu) / emuPerPx }
 
 // deck is what the converter needs from a .pptx.
 type deck struct {
-	files  map[string][]byte
-	slides []slideRef
-	cx, cy int64
-	theme  theme
+	files             map[string][]byte
+	slides            []slideRef
+	cx, cy            int64
+	theme             theme
+	links             map[string]partLinks
+	masterThemes      map[string]theme
+	tableStyles       map[string]*etree.Element
+	defaultTableStyle string
 	// defaults for text that sets nothing: presentation defaultTextStyle
 	defSz int
 }
@@ -79,7 +85,19 @@ func readDeck(data []byte) (*deck, error) {
 			d.defSz = int(v)
 		}
 	}
-	d.theme = d.readTheme()
+	d.theme = d.masterTheme("")
+	part := cmp.Or(d.relationships("ppt/presentation.xml").byType["tableStyles"], "ppt/tableStyles.xml")
+	if _, found := d.files[part]; found {
+		styles, err := d.xml(part)
+		if err != nil {
+			return nil, err
+		}
+		d.defaultTableStyle = styles.Root().SelectAttrValue("def", "")
+		d.tableStyles = make(map[string]*etree.Element)
+		for _, style := range styles.Root().SelectElements("tblStyle") {
+			d.tableStyles[strings.ToUpper(style.SelectAttrValue("styleId", ""))] = style
+		}
+	}
 	return d, nil
 }
 
@@ -101,54 +119,88 @@ func (d *deck) xml(name string) (*etree.Document, error) {
 }
 
 // rels maps relationship ids of a part to the parts they point at.
-func (d *deck) rels(part string) map[string]string {
+type partLinks struct{ byID, byType map[string]string }
+
+func (d *deck) rels(part string) map[string]string { return d.relationships(part).byID }
+
+func (d *deck) relationships(part string) partLinks {
+	if links, ok := d.links[part]; ok {
+		return links
+	}
+	links := partLinks{byID: map[string]string{}, byType: map[string]string{}}
+	if d.links == nil {
+		d.links = make(map[string]partLinks)
+	}
+	d.links[part] = links
+	if part == "" {
+		return links
+	}
 	dir, file := path.Split(part)
-	out := map[string]string{}
 	doc, err := d.xml(dir + "_rels/" + file + ".rels")
 	if err != nil {
-		return out
+		return links
 	}
 	for _, r := range doc.Root().ChildElements() {
-		t := r.SelectAttrValue("Target", "")
-		if r.SelectAttrValue("TargetMode", "") == "External" {
+		target := r.SelectAttrValue("Target", "")
+		if target == "" || r.SelectAttrValue("TargetMode", "") == "External" {
 			continue
 		}
-		out[r.SelectAttrValue("Id", "")] = path.Clean(path.Join(dir, t))
+		if strings.HasPrefix(target, "/") {
+			target = strings.TrimPrefix(path.Clean(target), "/")
+		} else {
+			target = path.Join(dir, target)
+		}
+		links.byID[r.SelectAttrValue("Id", "")] = target
+		links.byType[path.Base(r.SelectAttrValue("Type", ""))] = target
 	}
-	return out
+	return links
 }
 
-func (d *deck) readTheme() theme {
-	th := theme{colors: map[string]string{}, minor: map[string]string{}, major: map[string]string{},
-		clrMap: map[string]string{"bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2"}}
-	// the first slide's master decides; every slide of a WPS deck shares it
-	master := ""
-	if len(d.slides) > 0 {
-		for _, t := range d.rels(d.slides[0].part) {
-			if strings.Contains(t, "slideLayouts/") {
-				for _, m := range d.rels(t) {
-					if strings.Contains(m, "slideMasters/") {
-						master = m
-					}
-				}
+func (d *deck) slideTheme(part string, root *etree.Element) theme {
+	layout := d.relationships(part).byType["slideLayout"]
+	master := d.relationships(layout).byType["slideMaster"]
+	th := d.masterTheme(master)
+	override := root.SelectElement("clrMapOvr")
+	if override == nil && layout != "" {
+		if doc, err := d.xml(layout); err == nil {
+			override = doc.Root().SelectElement("clrMapOvr")
+		}
+	}
+	if override != nil {
+		if mapping := override.SelectElement("overrideClrMapping"); mapping != nil {
+			th.clrMap = maps.Clone(th.clrMap)
+			for _, a := range mapping.Attr {
+				th.clrMap[a.Key] = a.Value
 			}
 		}
 	}
-	themePart := "ppt/theme/theme1.xml"
+	return th
+}
+
+func (d *deck) masterTheme(master string) theme {
+	if th, ok := d.masterThemes[master]; ok {
+		return th
+	}
+	if d.masterThemes == nil {
+		d.masterThemes = map[string]theme{}
+	}
+	th := d.readTheme(master)
+	d.masterThemes[master] = th
+	return th
+}
+
+func (d *deck) readTheme(master string) theme {
+	th := theme{colors: map[string]string{}, minor: map[string]string{}, major: map[string]string{}, clrMap: map[string]string{"bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2"}}
 	if master != "" {
 		if doc, err := d.xml(master); err == nil {
-			if cm := doc.Root().FindElement("./clrMap"); cm != nil {
+			if cm := doc.Root().SelectElement("clrMap"); cm != nil {
 				for _, a := range cm.Attr {
 					th.clrMap[a.Key] = a.Value
 				}
 			}
 		}
-		for _, t := range d.rels(master) {
-			if strings.Contains(t, "theme/") {
-				themePart = t
-			}
-		}
 	}
+	themePart := cmp.Or(d.relationships(master).byType["theme"], d.relationships("ppt/presentation.xml").byType["theme"], "ppt/theme/theme1.xml")
 	doc, err := d.xml(themePart)
 	if err != nil {
 		return th

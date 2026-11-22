@@ -316,6 +316,7 @@ func (c *conv) slide(s slideRef) (string, string, error) {
 		return "", "", err
 	}
 	root := doc.Root()
+	c.d.theme = c.d.slideTheme(s.part, root)
 	rels := c.d.rels(s.part)
 	c.timing(root)
 	id := c.newID("slide")
@@ -551,7 +552,23 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 		}
 		st := c.style(e)
 		tb := e.FindElement("./txBody")
+		shadow, err := c.rectangleShadow(e, prst, st, fr)
+		if err != nil {
+			return err
+		}
 		if !hasText(tb) {
+			if shadow != nil {
+				o.open("Group")
+				o.open("Elements")
+				c.emitShadow(o, shadow)
+				if err := c.shape(o, c.newID("shape"), prst, adjusts(e), 0, 0, wd, ht, 0, st, nil, ""); err != nil {
+					return err
+				}
+				o.close("Elements")
+				c.tail(o, c.newID("group"), x, y, wd, ht, fr.rot, porg, "", nil)
+				o.close("Group")
+				return nil
+			}
 			return c.shape(o, c.newID("shape"), prst, adjusts(e), x, y, wd, ht, fr.rot, st, porg, fr.mirror())
 		}
 		fontColor := ""
@@ -562,6 +579,16 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 		box := visible(st.fill) || st.thickness > 0
 		if prst != "rect" {
 			box = true
+		}
+		if b.anchor == "ctr" && len(b.paras) > 0 {
+			// PowerPoint centers the entire line stack, even when it is
+			// taller than the saved shape. Seewo clamps overflowing text.
+			var contentHeight float64
+			for _, p := range b.paras {
+				contentHeight += float64(len(p.lines))*p.lineHeight() + p.spcBef + p.spcAft
+			}
+			b.tIns += int64((ht - px(b.tIns+b.bIns) - contentHeight) * emuPerPx / 2)
+			b.anchor = "t"
 		}
 		if !box && len(c.paraKeys[org.id]) > 0 {
 			c.paragraphBuild(o, b, x, y, wd, ht, fr.rot, org)
@@ -574,6 +601,10 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 			}
 		}
 		if !box {
+			if words := c.justifiedWords(b, wd); len(words) > 0 {
+				c.justifiedText(o, words, b.paras[0], x, y, wd, ht, fr.rot, porg)
+				return nil
+			}
 			band, ok := c.highlightBand(&b, int64(fr.cx))
 			if !ok {
 				band, ok = c.partialBands(&b, int64(fr.cx))
@@ -601,9 +632,10 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 			c.text(o, b, x, y, wd, ht, fr.rot, porg, 0)
 			return nil
 		}
-		// a framed text box: the frame, and the text over it
+		// a framed text box: the shadow, editable frame, and its text
 		o.open("Group")
 		o.open("Elements")
+		c.emitShadow(o, shadow)
 		if err := c.shape(o, c.newID("shape"), prst, adjusts(e), 0, 0, wd, ht, 0, st, nil, ""); err != nil {
 			return err
 		}
@@ -616,6 +648,24 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 		fr, ok := readFrame(e.FindElement("./spPr/xfrm"), t)
 		if !ok {
 			return nil
+		}
+		if audio := e.FindElement("./nvPicPr/nvPr/audioFile"); audio != nil {
+			media := rels[audio.SelectAttrValue("r:link", "")]
+			if len(c.d.files[media]) == 0 {
+				if embedded := e.FindElement("./nvPicPr/nvPr/extLst/ext/media"); embedded != nil {
+					media = rels[embedded.SelectAttrValue("r:embed", "")]
+				}
+			}
+			if len(c.d.files[media]) > 0 {
+				o.open("Audio")
+				o.leaf("Source", "id://"+c.resource(media))
+				o.leaf("MediaName", org.name)
+				o.leaf("Volume", "1")
+				c.tail(o, c.newID("audio"), px(int64(fr.x))-gx, px(int64(fr.y))-gy, px(int64(fr.cx)), px(int64(fr.cy)), fr.rot, porg, "", nil)
+				o.close("Audio")
+				return nil
+			}
+			c.warn("音频「%s」找不到内嵌文件，仅保留封面", org.name)
 		}
 		blip := e.FindElement(".//blip")
 		if blip == nil {
@@ -658,7 +708,9 @@ func (c *conv) element(o *w, e *etree.Element, rels map[string]string, t xform, 
 			o.open("Effects")
 			o.open("DropShadow")
 			o.leaf("Offset", f(px(attrInt(shadow, "dist"))))
-			o.leaf("Angle", f(math.Mod(360-float64(attrInt(shadow, "dir"))/60000, 360)))
+			// DrawingML measures clockwise from the right. Seewo's picture
+			// renderer also runs clockwise, starting at the top.
+			o.leaf("Angle", f(math.Mod(90+float64(attrInt(shadow, "dir"))/60000, 360)))
 			o.brush("ShadowBrush", col)
 			o.leaf("Opacity", "1")
 			o.leaf("BlurRadius", f(px(attrInt(shadow, "blurRad"))))
@@ -740,10 +792,13 @@ func (c *conv) text(o *w, b body, x, y, wd, ht, rot float64, org *origin, border
 }
 
 func (c *conv) resource(media string) string {
+	return c.addResource(media, c.d.files[media])
+}
+
+func (c *conv) addResource(media string, data []byte) string {
 	if r, ok := c.res[media]; ok {
 		return r.id
 	}
-	data := c.d.files[media]
 	sum := md5.Sum(data)
 	id := hex.EncodeToString(sum[:])
 	ext := strings.ToLower(path.Ext(media))

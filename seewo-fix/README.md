@@ -23,7 +23,8 @@ GUI 默认输出 `原文件名（希沃）.enbx`，CLI 默认输出 `原文件�
 
 | 路径 | 职责 |
 |---|---|
-| `main.go` | 拖放、应用状态、后台转换、对账和结果展示 |
+| `main.go` | 拖放、应用状态、后台转换、对账与应用入口 |
+| `view.go` | 原生界面、文件选择、操作反馈和转换结果展示 |
 | `cmd/seewo-fix/main.go` | `convert`、`report`、`fix`、`verify`、`calibrate`、`enbx` 命令 |
 | `internal/enbxgen/deck.go` | 读取 PPTX 包、关系、主题及基础单位 |
 | `internal/enbxgen/convert.go` | 元素转换、资源打包、动画顺序及段落副本 |

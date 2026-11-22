@@ -6,7 +6,7 @@ tool github.com/egoist/mygo/cmd/mygo
 
 require (
 	github.com/beevik/etree v1.8.1
-	github.com/egoist/mygo v0.9.1
+	github.com/egoist/mygo v0.10.0
 	golang.org/x/image v0.46.0
 )
 

@@ -156,6 +156,15 @@ func (s *sysFonts) font(typeface string, bold, italic bool) *sfnt.Font {
 }
 
 func (s *sysFonts) Width(text, typeface string, bold, italic bool, sizeEMU float64) (float64, bool) {
+	return s.measure(text, typeface, bold, italic, sizeEMU, false)
+}
+
+// KernedWidth includes the font's pair adjustments within a word.
+func (s *sysFonts) KernedWidth(text, typeface string, bold, italic bool, sizeEMU float64) (float64, bool) {
+	return s.measure(text, typeface, bold, italic, sizeEMU, true)
+}
+
+func (s *sysFonts) measure(text, typeface string, bold, italic bool, sizeEMU float64, kern bool) (float64, bool) {
 	f := s.font(typeface, bold, italic)
 	if f == nil {
 		return 0, false
@@ -163,6 +172,7 @@ func (s *sysFonts) Width(text, typeface string, bold, italic bool, sizeEMU float
 	var buf sfnt.Buffer
 	upm := fixed.Int26_6(f.UnitsPerEm())
 	total := 0.0
+	var prev sfnt.GlyphIndex
 	for _, r := range text {
 		gi, err := f.GlyphIndex(&buf, r)
 		if err != nil || gi == 0 {
@@ -172,6 +182,12 @@ func (s *sysFonts) Width(text, typeface string, bold, italic bool, sizeEMU float
 		if err != nil {
 			return 0, false
 		}
+		if kern && prev != 0 {
+			if k, err := f.Kern(&buf, prev, gi, upm, font.HintingNone); err == nil {
+				adv += k
+			}
+		}
+		prev = gi
 		total += float64(adv) / float64(upm)
 	}
 	return total * sizeEMU, true

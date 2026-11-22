@@ -1,0 +1,83 @@
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - run: mise run test
+      - run: mise run vet
+      - run: mise run cli
+      - name: Build and verify disk image
+        run: mise run dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-arm64
+          path: seewo-fix/build/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 30
+    concurrency: publish-stable
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - name: Check stable version and signing configuration
+        env:
+          SIGNING_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+        run: |
+          test "$(uname -m)" = arm64
+          version=$(jq -er .version seewo-fix/mygo.json)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$GITHUB_REF_NAME" = "v$version"
+          test -n "$SIGNING_KEY"
+      - name: Build signed archive and available deltas
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+        run: mise run dmg
+      - name: Publish verified assets together
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          build=seewo-fix/build
+          stage=$build/darwin-arm64
+          feed=$stage/update-darwin-arm64.json
+          jq -e --arg v "$version" '.version == $v and (.signature | length > 0)' "$feed"
+          archive="$stage/seewo-fix-$version-darwin-arm64.tar.gz"
+          test "$(stat -f %z "$archive")" = "$(jq -r .size "$feed")"
+          dmg="$build/seewo-fix-$version-macos-arm64.dmg"
+          cp "$build/希沃偏移修复-$version-arm64.dmg" "$dmg"
+          files=("$dmg" "$archive" "$feed")
+          shopt -s nullglob
+          files+=("$stage"/*.delta)
+          jq -r .notes "$feed" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

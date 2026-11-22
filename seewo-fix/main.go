@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
+	"github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 
 	"seewo-fix/internal/enbxgen"
@@ -44,9 +46,12 @@ type app struct {
 	calib *pptx.Calibration
 	enbx  string
 
-	busy  bool
-	lines []string
-	win   *mygo.Window
+	busy       bool
+	failed     bool
+	picking    bool
+	lines      []string
+	win        *mygo.Window
+	showOutput func(string) error
 }
 
 // info is what a quick diagnosis of the dropped deck can tell the window.
@@ -57,10 +62,11 @@ type info struct {
 
 func newApp() *app {
 	return &app{
-		textDX:  pptx.DefaultTextDX,
-		kaitiSC: true,
-		textDY:  pptx.DefaultTextDY,
-		lines:   []string{"把 .pptx 拖进窗口，生成 原文件名（希沃）.enbx"},
+		textDX:     pptx.DefaultTextDX,
+		kaitiSC:    true,
+		textDY:     pptx.DefaultTextDY,
+		lines:      []string{"把 .pptx 拖进窗口，生成 原文件名（希沃）.enbx"},
+		showOutput: func(path string) error { return exec.Command("open", "-R", path).Start() },
 	}
 }
 
@@ -89,7 +95,12 @@ func (a *app) refresh() {
 
 func (a *app) note(lines ...string) {
 	a.mu.Lock()
+	if a.busy {
+		a.mu.Unlock()
+		return
+	}
 	a.lines = lines
+	a.failed = true
 	a.mu.Unlock()
 	a.refresh()
 }
@@ -110,8 +121,16 @@ func (a *app) process(path string) {
 	}
 
 	a.mu.Lock()
+	if a.busy {
+		a.mu.Unlock()
+		return
+	}
 	a.path = path
 	a.out = ""
+	a.diag = info{}
+	a.calib = nil
+	a.enbx = ""
+	a.failed = false
 	a.busy = true
 	a.lines = []string{"正在转换…"}
 	opt := a.options()
@@ -143,6 +162,7 @@ func (a *app) process(path string) {
 func (a *app) done(text, out string) {
 	a.mu.Lock()
 	a.busy = false
+	a.failed = strings.Contains(text, "失败") || strings.HasPrefix(text, "先拖入")
 	a.out = out
 	a.lines = strings.Split(text, "\n")
 	if out != "" {
@@ -157,6 +177,11 @@ func (a *app) done(text, out string) {
 // converter dropped (text highlight) put back.
 func (a *app) measure(path string) {
 	a.mu.Lock()
+	if a.busy {
+		a.mu.Unlock()
+		return
+	}
+	a.failed = false
 	src := a.path // the deck the teacher dropped; a.out is the generated .enbx
 	keep := a.out
 	a.enbx = path
@@ -225,84 +250,24 @@ func (a *app) reveal() {
 	out := a.out
 	a.mu.Unlock()
 	if out != "" {
-		_ = exec.Command("open", "-R", out).Start()
+		if err := a.showOutput(out); err != nil {
+			a.note("显示输出失败：" + err.Error())
+		}
 	}
 }
 
-func (a *app) view(c *ui.Context) {
-	t := c.Theme()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	ui.Column(c).Fill().Padding(18).Gap(10).Children(func() {
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "希沃偏移修复").FontSize(20).Bold()
-			if a.busy {
-				ui.Badge(c, "处理中…")
-			}
-		})
-		ui.Text(c, "拖入 .pptx，直接生成希沃课件 原文件名（希沃）.enbx，用希沃白板打开即可").
-			FontSize(12).TextColor(t.TextMuted)
-
-		ui.Column(c).Key("drop").FillWidth().Padding(14).Gap(4).
-			Radius(10).Border(1, t.Border).Children(func() {
-			if a.path == "" {
-				ui.Text(c, "把课件拖到这里").FontSize(14).TextColor(t.TextMuted)
-				ui.Text(c, "组合坐标系归一 + 叠加文字对齐，其余保持不变").
-					FontSize(12).TextColor(t.TextMuted)
-				return
-			}
-			ui.Text(c, filepath.Base(a.path)).FontSize(14).Bold().MaxLines(1)
-			if a.diag.slides > 0 {
-				ui.Textf(c, "%d 页 · %d 个组合（%d 个非单位变换）",
-					a.diag.slides, a.diag.groups, a.diag.nonIdent).
-					FontSize(12).TextColor(t.TextMuted)
-			}
-		})
-
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			again := ui.PrimaryButton(c, "重新修复")
-			if a.path == "" || a.busy {
-				again.Disabled(true)
-			}
-			if again.Clicked() {
-				a.mu.Unlock()
-				a.process(a.path)
-				a.mu.Lock()
-			}
-			open := ui.Button(c, "显示输出")
-			if a.out == "" {
-				open.Disabled(true)
-			}
-			if open.Clicked() {
-				a.reveal()
-			}
-			ui.Checkbox(c, &a.advanced, "高级")
-		})
-
-		if a.advanced {
-			a.advancedView(c, t)
-		}
-
-		ui.Divider(c)
-		ui.List(c, nil, len(a.lines), func(i int) {
-			ui.Text(c, a.lines[i]).FontSize(12).Padding(4, 6)
-		}).Grow(1)
-	})
-}
-
 func (a *app) advancedView(c *ui.Context, t *ui.Theme) {
-	ui.Column(c).Gap(6).Padding(10).Radius(10).
+	ui.Column(c.Key("advanced-settings")).Gap(12).Padding(20).Radius(16).
 		Background(t.Surface).Children(func() {
-		ui.Text(c, "手动微调（默认全关，一般不用动）").
+		ui.Text(c, "手动微调 · 位移单位 pt").
 			FontSize(12).TextColor(t.TextMuted)
 		ui.Checkbox(c, &a.textOn, "文本框手动位移")
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Disabled(!a.textOn).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "文字 X").FontSize(12).Width(52)
 			ui.StepSlider(c, &a.textDX, -30, 30, 0.5).Grow(1)
 			ui.Textf(c, "%+.1f", a.textDX).Width(44).FontSize(12)
 		})
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Disabled(!a.textOn).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "文字 Y").FontSize(12).Width(52)
 			ui.StepSlider(c, &a.textDY, -30, 30, 0.5).Grow(1)
 			ui.Textf(c, "%+.1f", a.textDY).Width(44).FontSize(12)
@@ -319,7 +284,6 @@ func (a *app) advancedView(c *ui.Context, t *ui.Theme) {
 		})
 		ui.Checkbox(c, &a.ungroup, "彻底取消组合（组合内容仍错时再用）")
 		ui.Checkbox(c, &a.noAutofit, "冻结文本自动调整")
-		ui.Checkbox(c, &a.kaitiSC, "Mac 放映：楷体 换成 Kaiti SC（粗体才会生效；Windows 一体机上放映时取消）")
 		ui.Checkbox(c, &a.insets, "写出显式内边距")
 		ui.Divider(c)
 		if a.enbx == "" {
@@ -332,6 +296,7 @@ func (a *app) advancedView(c *ui.Context, t *ui.Theme) {
 }
 
 func main() {
+	mygo.Use(native.New(updater.Options{Language: "zh-CN"}))
 	a := newApp()
 
 	mygo.App.OnOpenFile(func(path string) {
@@ -341,11 +306,11 @@ func main() {
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "希沃偏移修复",
-			Width:     560,
-			Height:    560,
-			MinWidth:  460,
-			MinHeight: 420,
-			StateKey:  "main",
+			Width:     620,
+			Height:    720,
+			MinWidth:  540,
+			MinHeight: 560,
+			StateKey:  "main-polished",
 			Content:   ui.View(a.view),
 		})
 		a.win.OnFileDrop(func(e *mygo.FileDropEvent) {

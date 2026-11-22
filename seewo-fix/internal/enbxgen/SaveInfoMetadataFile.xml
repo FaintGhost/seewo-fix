@@ -67,6 +67,12 @@
       <FallbackSaveInfo></FallbackSaveInfo>
     </MetadataContract>
     <MetadataContract>
+      <SaveInfoName>Audio</SaveInfoName>
+      <SaveInfoFriendlyName></SaveInfoFriendlyName>
+      <SaveInfoType>Unset</SaveInfoType>
+      <FallbackSaveInfo></FallbackSaveInfo>
+    </MetadataContract>
+    <MetadataContract>
       <SaveInfoName>Picture</SaveInfoName>
       <SaveInfoFriendlyName></SaveInfoFriendlyName>
       <SaveInfoType>Unset</SaveInfoType>

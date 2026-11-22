@@ -1,2 +1,38 @@
 [tools]
 go = "1.27.4"
+
+[tasks.cli]
+description = "构建命令行工具"
+dir = "{{config_root}}/seewo-fix"
+run = "mkdir -p build && go build -o build/seewo-fix ./cmd/seewo-fix"
+
+[tasks.app]
+description = "构建原生应用（不生成 DMG）"
+dir = "{{config_root}}/seewo-fix"
+run = "go tool mygo build -skip-dmg"
+
+[tasks.dmg]
+description = "构建并校验 macOS DMG 安装镜像"
+depends = ["app"]
+dir = "{{config_root}}"
+run = "sh scripts/build-dmg.sh"
+
+[tasks.compare]
+description = "将三组画布截图生成同页叠图报告"
+dir = "{{config_root}}"
+run = "uv run --script scripts/compare-canvases.py"
+
+[tasks.test]
+description = "运行 Go 测试和竞态检查"
+dir = "{{config_root}}/seewo-fix"
+run = "go test -race ./..."
+
+[tasks.vet]
+description = "检查 Go 代码及 mygo UI 生命周期"
+dir = "{{config_root}}/seewo-fix"
+run = ["go vet ./...", "go tool mygo vet ."]
+
+[tasks.fmt]
+description = "格式化 Go 源码"
+dir = "{{config_root}}/seewo-fix"
+run = "go fmt ./..."
