@@ -1,10 +1,19 @@
 name: Build and release
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 已推送的稳定版标签
+        type: string
+        required: true
   pull_request:
   push:
     branches: [main]
     tags: ['v*']
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -17,6 +26,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
       - run: mise run test
       - run: mise run vet
@@ -32,7 +42,7 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 30
     concurrency: publish-stable
@@ -42,6 +52,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
       - name: Check stable version and signing configuration
         env:
@@ -50,7 +61,7 @@ jobs:
           test "$(uname -m)" = arm64
           version=$(jq -er .version seewo-fix/mygo.json)
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$RELEASE_TAG" = "v$version"
           test -n "$SIGNING_KEY"
       - name: Build signed archive and available deltas
         env:
@@ -61,7 +72,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version=${GITHUB_REF_NAME#v}
+          version=${RELEASE_TAG#v}
           build=seewo-fix/build
           stage=$build/darwin-arm64
           feed=$stage/update-darwin-arm64.json
@@ -74,10 +85,10 @@ jobs:
           shopt -s nullglob
           files+=("$stage"/*.delta)
           jq -r .notes "$feed" > "$RUNNER_TEMP/release-notes.md"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
